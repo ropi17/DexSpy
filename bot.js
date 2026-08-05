@@ -193,10 +193,33 @@ async function startScrapingCycle() {
         scrapeSpinner = ora('1. Bot melakukan web scraping... (proses)').start();
         console.log("\n  ↳ 1.1 Membuka URL DexScreener...");
         
-        context = await globalBrowser.newContext();
+        context = await globalBrowser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport: { width: 1920, height: 1080 },
+            locale: 'en-US',
+            timezoneId: 'America/New_York'
+        });
         page = await context.newPage();
         
         await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        
+        // Coba deteksi dan klik Cloudflare Checkbox jika muncul
+        try {
+            const cfIframe = await page.waitForSelector('iframe', { timeout: 5000 });
+            if (cfIframe) {
+                const frame = await cfIframe.contentFrame();
+                if (frame) {
+                    const checkbox = await frame.waitForSelector('input[type="checkbox"]', { timeout: 3000 });
+                    if (checkbox) {
+                        console.log("  ↳ Mencoba mengklik Cloudflare Checkbox...");
+                        await checkbox.click();
+                        await page.waitForTimeout(5000);
+                    }
+                }
+            }
+        } catch (e) {
+            // Abaikan jika tidak ada checkbox Cloudflare
+        }
         
         console.log("  ↳ 1.2 Memvalidasi sorting data TRADER...");
         try {
