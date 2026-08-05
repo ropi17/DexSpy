@@ -1,5 +1,5 @@
 require('dotenv').config();
-process.env.NTBA_FIX_350 = 1; // Fix deprecation warning for sendPhoto
+process.env.NTBA_FIX_350 = 1; // Fix deprecation warning
 const TelegramBot = require('node-telegram-bot-api');
 const { DynamoDBClient, GetItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 const ora = require('ora');
@@ -7,24 +7,23 @@ const fs = require('fs');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Konfigurasi Environment (Gunakan .env di production)
+// Konfigurasi Environment
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; 
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const TARGET_URL = process.env.TARGET_URL || 'https://dexscreener.com/solana';
 const ZENROWS_API_KEY = process.env.ZENROWS_API_KEY || 'YOUR_ZENROWS_API_KEY';
 
-// Inisialisasi AWS DynamoDB (Kredensial otomatis dari IAM Role EC2)
+// Inisialisasi AWS DynamoDB
 const dynamodb = new DynamoDBClient({ region: AWS_REGION });
-
-// Inisialisasi Telegram Bot (Mode Polling)
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 // === Variabel Global Manajemen State ===
 let isShuttingDown = false;
+let isScrapingActive = false; // Default: Berhenti saat awal boot
+let isScrapingRunning = false; // Mencegah overlapping loop fungsi asinkron
 let userStates = {}; 
 
-// RAM State 
 let currentFilter = {
     minTraders: 0,
     minVolume: 0,
@@ -71,88 +70,116 @@ async function saveConfigToDB(filter) {
     await dynamodb.send(command);
 }
 
-// === TELEGRAM BOT LOGIC ===
-bot.onText(/\/filter/, (msg) => {
-    const chatId = msg.chat.id;
-    const text = `🎯 *Filter Aktif Saat Ini:*\n\n` +
+// === TELEGRAM INTERACTIVE DASHBOARD ===
+function sendDashboard(chatId, messageIdToEdit = null) {
+    const statusText = isScrapingActive ? "🟢 *RUNNING*" : "🔴 *STOPPED*";
+    
+    const text = `🤖 *DexScreener Bot Dashboard*\n\n` +
+                 `Status Mesin: ${statusText}\n\n` +
+                 `🎯 *Filter Saat Ini (RAM):*\n` +
                  `👥 Min Traders: ${currentFilter.minTraders}\n` +
                  `📊 Min Volume: $${currentFilter.minVolume}\n` +
                  `💧 Min Liquidity: $${currentFilter.minLiquidity}\n` +
                  `📈 Min Change 5m: ${currentFilter.minPriceChange5m}%\n` +
                  `📈 Min Change 24h: ${currentFilter.minPriceChange24h}%`;
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: isScrapingActive ? '⏹️ STOP SCRAPER' : '▶️ START SCRAPER', callback_data: isScrapingActive ? 'cmd_stop' : 'cmd_start' }
+            ],
+            [
+                { text: '✏️ Edit Traders', callback_data: 'edit_traders' },
+                { text: '✏️ Edit Volume', callback_data: 'edit_volume' }
+            ],
+            [
+                { text: '✏️ Edit Liquidity', callback_data: 'edit_liquidity' }
+            ],
+            [
+                { text: '✏️ Edit 5m Change', callback_data: 'edit_5m' },
+                { text: '✏️ Edit 24h Change', callback_data: 'edit_24h' }
+            ],
+            [
+                { text: '💾 SIMPAN KE DATABASE AWS', callback_data: 'save_db' }
+            ]
+        ]
+    };
+
+    if (messageIdToEdit) {
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', reply_markup: keyboard }).catch(()=>{});
+    } else {
+        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(console.error);
+    }
+}
+
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
     
-    bot.sendMessage(chatId, text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[{ text: '📝 Edit Filter', callback_data: 'edit_filter' }]]
+    if (msg.text === '/start' || msg.text === '/menu') {
+        userStates[chatId] = null; // reset state
+        sendDashboard(chatId);
+        return;
+    }
+
+    // Jika user sedang dalam mode Edit
+    if (userStates[chatId] && msg.text && !msg.text.startsWith('/')) {
+        const val = parseFloat(msg.text.trim());
+        if (isNaN(val)) {
+            bot.sendMessage(chatId, "❌ Harap masukkan angka yang valid.");
+            return;
         }
-    });
+
+        switch (userStates[chatId]) {
+            case 'edit_traders': currentFilter.minTraders = val; break;
+            case 'edit_volume': currentFilter.minVolume = val; break;
+            case 'edit_liquidity': currentFilter.minLiquidity = val; break;
+            case 'edit_5m': currentFilter.minPriceChange5m = val; break;
+            case 'edit_24h': currentFilter.minPriceChange24h = val; break;
+        }
+        
+        userStates[chatId] = null; // clear state
+        bot.sendMessage(chatId, "✅ Nilai diupdate secara sementara (Tekan 'SIMPAN KE DATABASE' untuk memanenkannya).", { parse_mode: 'Markdown' });
+        sendDashboard(chatId);
+    }
 });
 
 bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
+    const msgId = query.message.message_id;
 
-    if (data === 'edit_filter') {
-        userStates[chatId] = { mode: 'DRAFT_MODE', draft: null };
-        bot.sendMessage(chatId, "Kirim 5 angka berurutan yang dipisah spasi (Traders Volume Liq %5m %24h).\n\nContoh: `25 1000 500 15 -5`", { parse_mode: 'Markdown' });
-    } else if (data === 'save_filter') {
-        if (userStates[chatId] && userStates[chatId].draft) {
-            currentFilter = { ...userStates[chatId].draft };
-            try {
-                await saveConfigToDB(currentFilter);
-                bot.sendMessage(chatId, "✅ Filter berhasil disimpan ke Database dan RAM diupdate!");
-            } catch (error) {
-                bot.sendMessage(chatId, `❌ Gagal menyimpan ke Database AWS: ${error.message}`);
+    if (data === 'cmd_start') {
+        if (!isScrapingActive) {
+            isScrapingActive = true;
+            bot.answerCallbackQuery(query.id, { text: "▶️ Scraper Dimulai!" });
+            sendDashboard(chatId, msgId);
+            if (!isScrapingRunning) {
+                startScrapingCycle();
             }
-            delete userStates[chatId];
         } else {
-            bot.sendMessage(chatId, "❌ Draft tidak ditemukan atau sudah kadaluarsa.");
+            bot.answerCallbackQuery(query.id, { text: "Bot sudah berjalan" });
         }
-    } else if (data === 'cancel_filter') {
-        delete userStates[chatId];
-        bot.sendMessage(chatId, "❌ Edit filter dibatalkan.");
-    }
-    
-    bot.answerCallbackQuery(query.id).catch(() => {});
-});
-
-bot.on('message', (msg) => {
-    const chatId = msg.chat.id;
-    if (msg.text && !msg.text.startsWith('/') && userStates[chatId] && userStates[chatId].mode === 'DRAFT_MODE') {
-        const parts = msg.text.trim().split(/\s+/);
-        if (parts.length === 5) {
-            const [t, v, l, p5, p24] = parts.map(Number);
-            if (parts.every(p => !isNaN(p))) {
-                userStates[chatId].draft = {
-                    minTraders: t,
-                    minVolume: v,
-                    minLiquidity: l,
-                    minPriceChange5m: p5,
-                    minPriceChange24h: p24
-                };
-                
-                const preview = `🔍 *Preview Filter Baru:*\n\n` +
-                                `👥 Traders: ${t}\n` +
-                                `📊 Volume: $${v}\n` +
-                                `💧 Liquidity: $${l}\n` +
-                                `📈 Change 5m: ${p5}%\n` +
-                                `📈 Change 24h: ${p24}%\n\n` +
-                                `Simpan pengaturan ini?`;
-                
-                bot.sendMessage(chatId, preview, {
-                    parse_mode: 'Markdown',
-                    reply_markup: {
-                        inline_keyboard: [
-                            [{ text: '💾 SAVE', callback_data: 'save_filter' }, { text: '❌ CANCEL', callback_data: 'cancel_filter' }]
-                        ]
-                    }
-                });
-            } else {
-                bot.sendMessage(chatId, "❌ Format salah. Pastikan semua adalah angka.\nContoh: `25 1000 500 15 -5`", { parse_mode: 'Markdown' });
-            }
-        } else {
-            bot.sendMessage(chatId, "❌ Harus tepat 5 angka dipisahkan spasi.\nContoh: `25 1000 500 15 -5`", { parse_mode: 'Markdown' });
+    } else if (data === 'cmd_stop') {
+        isScrapingActive = false;
+        bot.answerCallbackQuery(query.id, { text: "⏹️ Scraper Dihentikan!" });
+        sendDashboard(chatId, msgId);
+    } else if (data.startsWith('edit_')) {
+        userStates[chatId] = data;
+        let promptText = "";
+        if (data === 'edit_traders') promptText = "Kirimkan angka baru untuk *Min Traders*:";
+        if (data === 'edit_volume') promptText = "Kirimkan angka baru untuk *Min Volume ($)*:";
+        if (data === 'edit_liquidity') promptText = "Kirimkan angka baru untuk *Min Liquidity ($)*:";
+        if (data === 'edit_5m') promptText = "Kirimkan angka baru untuk *Min Change 5m (%)*:";
+        if (data === 'edit_24h') promptText = "Kirimkan angka baru untuk *Min Change 24h (%)*:";
+        
+        bot.sendMessage(chatId, promptText, { parse_mode: 'Markdown' });
+        bot.answerCallbackQuery(query.id);
+    } else if (data === 'save_db') {
+        try {
+            await saveConfigToDB(currentFilter);
+            bot.answerCallbackQuery(query.id, { text: "✅ Tersimpan Permanen di Database AWS!", show_alert: true });
+        } catch (e) {
+            bot.answerCallbackQuery(query.id, { text: "❌ Gagal menyimpan", show_alert: true });
         }
     }
 });
@@ -178,18 +205,21 @@ function parseMetric(str) {
 
 // === LOGIKA SCRAPING UTAMA (ZENROWS API) ===
 async function startScrapingCycle() {
-    if (isShuttingDown) return;
+    if (isShuttingDown || !isScrapingActive) {
+        isScrapingRunning = false;
+        console.log("🛑 Bot dimatikan. Menunggu perintah Start...");
+        return;
+    }
     
+    isScrapingRunning = true;
     let scrapeSpinner = null;
     let processSpinner = null;
     let scrapedData = [];
     
     try {
-        // --- INSTANCE 1 ---
         scrapeSpinner = ora('1. Bot melakukan Request ke ZenRows API... (proses)').start();
         console.log("\n  ↳ 1.1 Menghubungi ZenRows untuk mem-bypass Cloudflare...");
         
-        // Memanggil API ZenRows untuk membypass Cloudflare & Render JS DexScreener
         const response = await axios({
             url: 'https://api.zenrows.com/v1/',
             method: 'GET',
@@ -199,21 +229,21 @@ async function startScrapingCycle() {
                 'js_render': 'true',
                 'antibot': 'true',
                 'premium_proxy': 'true',
-                'wait_for': '.ds-dex-table-row' // Tunggu hingga tabel token termuat sepenuhnya
+                'wait_for': '.ds-dex-table-row' 
             },
-            timeout: 60000 // Timeout ZenRows bisa sedikit lebih lama karena rendering JS
+            timeout: 60000 
         });
         
-        console.log("  ↳ 1.2 Mengekstrak data HTML Top 10 token dengan Cheerio...");
+        console.log("  ↳ 1.2 Mengekstrak seluruh data HTML token dengan Cheerio...");
         const html = response.data;
         const $ = cheerio.load(html);
         
-        const rows = $('.ds-dex-table-row').slice(0, 10);
-        
+        const rows = $('.ds-dex-table-row');
         if (rows.length === 0) {
-            throw new Error("Tidak menemukan tabel data '.ds-dex-table-row'. Mungkin class DexScreener berubah.");
+            throw new Error("Tidak menemukan tabel data. Kelas mungkin berubah atau loading tertunda.");
         }
         
+        let rawTokens = [];
         rows.each((i, el) => {
             const addressLink = $(el).find('a.ds-dex-table-row-link').attr('href');
             const address = addressLink ? addressLink.split('/').pop() : 'unknown';
@@ -224,41 +254,37 @@ async function startScrapingCycle() {
                 cells.push($(cellEl).text().trim());
             });
             
-            scrapedData.push({ address, name, cells });
+            rawTokens.push({ address, name, cells });
         });
+
+        console.log(`  ↳ 1.3 Berhasil menarik ${rawTokens.length} token. Melakukan sorting berdasarkan jumlah Traders...`);
         
-        console.log("  ↳ 1.3 Data berhasil ditarik ke server.");
-        scrapeSpinner.succeed('1. Bot melakukan Request ke ZenRows API... (DONE)');
+        // 1.4: Menerjemahkan format metrik (Traders, Volume, dll) untuk keperluan evaluasi & sorting
+        for (let t of rawTokens) {
+            t.volume = parseMetric(t.cells[3] || "0");
+            t.traders = parseMetric(t.cells[4] || "0");
+            t.change5m = parseMetric(t.cells[5] || "0");
+            t.change24h = parseMetric(t.cells[8] || "0");
+            t.liquidity = parseMetric(t.cells[9] || "0");
+        }
+        
+        // 1.5: SORTING DATA berdasarkan TRADERS terbesar (Descending)
+        rawTokens.sort((a, b) => b.traders - a.traders);
+        
+        // Ambil Top 10 SAJA setelah disorting
+        scrapedData = rawTokens.slice(0, 10);
+        
+        scrapeSpinner.succeed('1. Ekstraksi dan Sorting Data... (DONE)');
         
         // --- INSTANCE 2 ---
         processSpinner = ora('2. Mengolah data hasil scraping... (proses)').start();
-        console.log("\n  ↳ 2.1 Mengirim data file ke debug_raw_data.json...");
+        console.log("\n  ↳ 2.1 Menyimpan Top 10 (sorted) ke debug_raw_data.json...");
         fs.writeFileSync('debug_raw_data.json', JSON.stringify(scrapedData, null, 2));
         
         console.log("  ↳ 2.2 Memfilter data menggunakan pengaturan Telegram...");
         let passedTokens = [];
         
-        for (const token of scrapedData) {
-            // Asumsi mapping kolom DexScreener (Bisa disesuaikan dari debug_raw_data.json)
-            const volumeStr = token.cells[3] || "0";
-            const tradersStr = token.cells[4] || "0";
-            const change5mStr = token.cells[5] || "0";
-            const change24hStr = token.cells[8] || "0";
-            const liquidityStr = token.cells[9] || "0";
-            
-            const volume = parseMetric(volumeStr);
-            const traders = parseMetric(tradersStr);
-            const change5m = parseMetric(change5mStr);
-            const change24h = parseMetric(change24hStr);
-            const liquidity = parseMetric(liquidityStr);
-            
-            const pToken = {
-                address: token.address,
-                name: token.name,
-                volume, traders, liquidity, change5m, change24h
-            };
-            
-            // Cek data terakhir di DB untuk evaluasi kondisi B (Surge)
+        for (const pToken of scrapedData) {
             let lastTraders = 0;
             let lastVolume = 0;
             let lastAlertTime = 0;
@@ -295,9 +321,9 @@ async function startScrapingCycle() {
             
             if (meetsBasicRAM) {
                 if (lastAlertTime === 0) {
-                    // KONDISI A (Baru pertama kali alert)
+                    // KONDISI A
                     conditionMet = true;
-                    conditionType = "Baru (Kondisi A)";
+                    conditionType = "Baru Masuk Filter (Kondisi A)";
                 } else {
                     // KONDISI B (Surge Traders >= 50% atau Volume >= 100%, dan jeda > 5 menit)
                     const tradersSurge = lastTraders > 0 && (pToken.traders >= lastTraders * 1.5);
@@ -305,7 +331,7 @@ async function startScrapingCycle() {
                     
                     if ((tradersSurge || volumeSurge) && timeSinceLastAlert > fiveMinutes) {
                         conditionMet = true;
-                        conditionType = "Surge (Kondisi B)";
+                        conditionType = "Surge Terdeteksi (Kondisi B)";
                     }
                 }
             }
@@ -314,7 +340,6 @@ async function startScrapingCycle() {
                 pToken.conditionType = conditionType;
                 passedTokens.push(pToken);
                 
-                // Update ke DB 
                 try {
                     const updateCmd = new UpdateItemCommand({
                         TableName: 'DexScreenerPairs',
@@ -327,14 +352,11 @@ async function startScrapingCycle() {
                         }
                     });
                     await dynamodb.send(updateCmd);
-                } catch (e) {
-                    console.error("Gagal update token ke DB:", e.message);
-                }
+                } catch (e) {}
             }
         }
         
         console.log(`  ↳ 2.3 Ditemukan ${passedTokens.length} token lolos filter.`);
-        console.log(`  ↳ 2.4 Mengirim ${passedTokens.length} token ke server Telegram...`);
         
         for (const t of passedTokens) {
             const msg = `🚀 *DexScreener Alert - ${t.conditionType}*\n\n` +
@@ -353,41 +375,29 @@ async function startScrapingCycle() {
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
         
     } catch (e) {
-        if (scrapeSpinner && scrapeSpinner.isSpinning) {
-            scrapeSpinner.fail(`1. Bot melakukan web scraping API... (FAILED: ${e.message})`);
-        } else if (processSpinner && processSpinner.isSpinning) {
-            processSpinner.fail(`2. Mengolah data hasil scraping... (FAILED: ${e.message})`);
-        } else {
-            console.error("\nTerjadi error pada siklus:", e.message);
-        }
+        if (scrapeSpinner && scrapeSpinner.isSpinning) scrapeSpinner.fail(`1. Bot API Error... (FAILED: ${e.message})`);
+        else if (processSpinner && processSpinner.isSpinning) processSpinner.fail(`2. Data Error... (FAILED: ${e.message})`);
+        else console.error("\nTerjadi error pada siklus:", e.message);
         
-        // Kirim error ke Telegram
-        try {
-            await bot.sendMessage(ADMIN_CHAT_ID, `❌ *API Scraping Error:*\n${e.message}`, { parse_mode: 'Markdown' });
-        } catch (err) {}
-        
+        try { bot.sendMessage(ADMIN_CHAT_ID, `❌ *API Scraping Error:*\n${e.message}`, { parse_mode: 'Markdown' }); } catch (err) {}
     } finally {
-        console.log("\n⏳ Menunggu jeda 1 menit...\n");
-        // === ANTI-OVERLAPPING LOOP ===
-        if (!isShuttingDown) {
+        if (isScrapingActive && !isShuttingDown) {
+            console.log("\n⏳ Menunggu jeda 1 menit...\n");
             setTimeout(startScrapingCycle, 60000);
+        } else {
+            console.log("🛑 Siklus Scraper berhenti atas instruksi.");
+            isScrapingRunning = false;
         }
     }
 }
 
 // === GRACEFUL SHUTDOWN (PM2) ===
 const shutdown = async (signal) => {
-    console.log(`\nMenerima sinyal ${signal}. Menutup proses dengan aman...`);
+    console.log(`\nMenerima sinyal ${signal}. Menutup proses...`);
     isShuttingDown = true;
+    isScrapingActive = false;
     
-    try {
-        await bot.stopPolling();
-        console.log("✅ Polling Telegram dihentikan.");
-    } catch(e) {
-        console.error("Gagal stop polling Telegram:", e.message);
-    }
-    
-    console.log("Exiting Node process...");
+    try { await bot.stopPolling(); } catch(e) {}
     process.exit(0);
 };
 
@@ -396,15 +406,13 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // === INISIALISASI PROGRAM ===
 async function init() {
-    console.log("🚀 Inisialisasi Bot DexScreener (ZenRows Edition)...");
+    console.log("🚀 Inisialisasi Bot DexScreener (Telegram Dashboard UI)...");
     
     // 1. Load config awal dari DB
     await loadConfigFromDB();
-    console.log("✅ Config dimuat dari DB ke RAM:", currentFilter);
+    console.log("✅ Config dimuat dari DB ke RAM.");
     
-    // 2. Mulai siklus 24/7
-    console.log("\n=== MEMULAI SIKLUS SCRAPING 24/7 (LEWAT ZENROWS) ===");
-    startScrapingCycle();
+    console.log("ℹ️ Bot dalam kondisi STOPPED. Buka Telegram dan ketik /start untuk menyalakan scraper.");
 }
 
 init();
