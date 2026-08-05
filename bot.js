@@ -351,6 +351,15 @@ async function startScrapingCycle() {
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
         
     } catch (e) {
+        if (page) {
+            try {
+                const screenshot = await page.screenshot();
+                await bot.sendPhoto(ADMIN_CHAT_ID, screenshot, { caption: `❌ *Scraping Error:*\n${e.message}\n\n📸 _Screenshot halaman saat error terjadi_`, parse_mode: 'Markdown' });
+            } catch (err) {
+                console.error("Gagal mengambil/mengirim screenshot:", err.message);
+            }
+        }
+
         if (scrapeSpinner && scrapeSpinner.isSpinning) {
             scrapeSpinner.fail(`1. Bot melakukan web scraping... (FAILED: ${e.message})`);
         } else if (processSpinner && processSpinner.isSpinning) {
