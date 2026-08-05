@@ -14,7 +14,9 @@
     "dotenv": "^16.4.5",
     "node-telegram-bot-api": "^0.65.0",
     "ora": "5.4.1",
-    "playwright": "^1.42.0"
+    "playwright": "^1.42.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "author": "",
   "license": "ISC"

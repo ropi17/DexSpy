@@ -1,6 +1,8 @@
 require('dotenv').config();
 process.env.NTBA_FIX_350 = 1; // Fix deprecation warning for sendPhoto
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
 const TelegramBot = require('node-telegram-bot-api');
 const { DynamoDBClient, GetItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 const ora = require('ora');
@@ -419,8 +421,15 @@ async function init() {
     console.log("✅ Config dimuat dari DB ke RAM:", currentFilter);
     
     // 2. Start global browser
-    console.log("Membuka browser global Playwright...");
-    globalBrowser = await chromium.launch({ headless: true });
+    console.log("Membuka browser global Playwright (Stealth Mode)...");
+    globalBrowser = await chromium.launch({
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled'
+        ]
+    });
     console.log("✅ Browser siap.");
     
     // 3. Mulai siklus 24/7
