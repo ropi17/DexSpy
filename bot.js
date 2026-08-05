@@ -251,7 +251,7 @@ async function startScrapingCycle() {
         console.log(`  ↳ 1.3 Berhasil mengekstrak ${rows.length} token teratas langsung dari UI...`);
         
         rows.each((i, el) => {
-            const addressLink = $(el).find('a.ds-dex-table-row-link').attr('href');
+            const addressLink = $(el).attr('href');
             const address = addressLink ? addressLink.split('/').pop() : 'unknown';
             const name = $(el).find('.ds-dex-table-row-base-token-symbol').text().trim() || 'UNKNOWN';
             
