@@ -1,4 +1,5 @@
 require('dotenv').config();
+process.env.NTBA_FIX_350 = 1; // Fix deprecation warning for sendPhoto
 const { chromium } = require('playwright');
 const TelegramBot = require('node-telegram-bot-api');
 const { DynamoDBClient, GetItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
@@ -354,7 +355,8 @@ async function startScrapingCycle() {
         if (page) {
             try {
                 const screenshot = await page.screenshot();
-                await bot.sendPhoto(ADMIN_CHAT_ID, screenshot, { caption: `❌ *Scraping Error:*\n${e.message}\n\n📸 _Screenshot halaman saat error terjadi_`, parse_mode: 'Markdown' });
+                // Menghapus parse_mode: 'Markdown' agar simbol aneh dari e.message tidak membuat Telegram error
+                await bot.sendPhoto(ADMIN_CHAT_ID, screenshot, { caption: `❌ Scraping Error:\n${e.message}\n\n📸 Screenshot halaman saat error terjadi` }, { filename: 'error.png', contentType: 'image/png' });
             } catch (err) {
                 console.error("Gagal mengambil/mengirim screenshot:", err.message);
             }
