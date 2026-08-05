@@ -9,6 +9,7 @@ const fs = require('fs');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; // Chat ID untuk menerima notifikasi
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+const TARGET_URL = process.env.TARGET_URL || 'https://dexscreener.com/solana';
 
 // Inisialisasi AWS DynamoDB (Kredensial otomatis diambil dari environment / IAM Role EC2)
 const dynamodb = new DynamoDBClient({ region: AWS_REGION });
@@ -192,7 +193,7 @@ async function startScrapingCycle() {
         context = await globalBrowser.newContext();
         page = await context.newPage();
         
-        await page.goto('https://dexscreener.com/solana', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
         
         console.log("  ↳ 1.2 Memvalidasi sorting data TRADER...");
         try {
@@ -341,7 +342,7 @@ async function startScrapingCycle() {
                         `💧 Liquidity: $${t.liquidity}\n` +
                         `📈 5m Change: ${t.change5m}%\n` +
                         `📈 24h Change: ${t.change24h}%\n\n` +
-                        `[🔗 View on DexScreener](https://dexscreener.com/solana/${t.address})`;
+                        `[🔗 View on DexScreener](${TARGET_URL}/${t.address})`;
             
             // Kirim ke admin
             bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: true }).catch(console.error);
