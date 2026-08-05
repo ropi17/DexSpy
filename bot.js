@@ -229,21 +229,27 @@ async function startScrapingCycle() {
                 'js_render': 'true',
                 'antibot': 'true',
                 'premium_proxy': 'true',
-                'wait_for': '.ds-dex-table-row' 
+                'wait_for': '.ds-dex-table-row',
+                'js_instructions': JSON.stringify([
+                    { "wait": 2000 },
+                    { "evaluate": "const elements = Array.from(document.querySelectorAll('button, th, div')); const target = elements.find(e => e.textContent.trim() === 'TRADERS'); if (target) target.click();" },
+                    { "wait": 4000 }
+                ])
             },
-            timeout: 60000 
+            timeout: 90000 
         });
         
         console.log("  ↳ 1.2 Mengekstrak seluruh data HTML token dengan Cheerio...");
         const html = response.data;
         const $ = cheerio.load(html);
         
-        const rows = $('.ds-dex-table-row');
+        const rows = $('.ds-dex-table-row').slice(0, 10);
         if (rows.length === 0) {
             throw new Error("Tidak menemukan tabel data. Kelas mungkin berubah atau loading tertunda.");
         }
         
-        let rawTokens = [];
+        console.log(`  ↳ 1.3 Berhasil mengekstrak ${rows.length} token teratas langsung dari UI...`);
+        
         rows.each((i, el) => {
             const addressLink = $(el).find('a.ds-dex-table-row-link').attr('href');
             const address = addressLink ? addressLink.split('/').pop() : 'unknown';
@@ -254,31 +260,21 @@ async function startScrapingCycle() {
                 cells.push($(cellEl).text().trim());
             });
             
-            rawTokens.push({ address, name, cells });
+            // Langsung parse metrik dari Top 10
+            const volume = parseMetric(cells[3] || "0");
+            const traders = parseMetric(cells[4] || "0");
+            const change5m = parseMetric(cells[5] || "0");
+            const change24h = parseMetric(cells[8] || "0");
+            const liquidity = parseMetric(cells[9] || "0");
+            
+            scrapedData.push({ address, name, cells, volume, traders, change5m, change24h, liquidity });
         });
-
-        console.log(`  ↳ 1.3 Berhasil menarik ${rawTokens.length} token. Melakukan sorting berdasarkan jumlah Traders...`);
         
-        // 1.4: Menerjemahkan format metrik (Traders, Volume, dll) untuk keperluan evaluasi & sorting
-        for (let t of rawTokens) {
-            t.volume = parseMetric(t.cells[3] || "0");
-            t.traders = parseMetric(t.cells[4] || "0");
-            t.change5m = parseMetric(t.cells[5] || "0");
-            t.change24h = parseMetric(t.cells[8] || "0");
-            t.liquidity = parseMetric(t.cells[9] || "0");
-        }
-        
-        // 1.5: SORTING DATA berdasarkan TRADERS terbesar (Descending)
-        rawTokens.sort((a, b) => b.traders - a.traders);
-        
-        // Ambil Top 10 SAJA setelah disorting
-        scrapedData = rawTokens.slice(0, 10);
-        
-        scrapeSpinner.succeed('1. Ekstraksi dan Sorting Data... (DONE)');
+        scrapeSpinner.succeed('1. Ekstraksi Data via UI Click... (DONE)');
         
         // --- INSTANCE 2 ---
         processSpinner = ora('2. Mengolah data hasil scraping... (proses)').start();
-        console.log("\n  ↳ 2.1 Menyimpan Top 10 (sorted) ke debug_raw_data.json...");
+        console.log("\n  ↳ 2.1 Menyimpan Top 10 ke debug_raw_data.json...");
         fs.writeFileSync('debug_raw_data.json', JSON.stringify(scrapedData, null, 2));
         
         console.log("  ↳ 2.2 Memfilter data menggunakan pengaturan Telegram...");
