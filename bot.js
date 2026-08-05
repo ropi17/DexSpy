@@ -378,7 +378,7 @@ async function startScrapingCycle() {
                         `📈 24h Change: ${t.change24h}%\n\n` +
                         `[🔗 View on DexScreener](${TARGET_URL}/${t.address})`;
             
-            bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: true }).catch(console.error);
+            bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: false }).catch(console.error);
         }
         
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
