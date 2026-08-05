@@ -232,7 +232,7 @@ async function startScrapingCycle() {
                 'wait_for': '.ds-dex-table-row',
                 'js_instructions': JSON.stringify([
                     { "wait": 2000 },
-                    { "evaluate": "const elements = Array.from(document.querySelectorAll('button, th, div')); const target = elements.find(e => e.textContent.trim().toUpperCase() === 'TRADERS'); if (target) target.click();" },
+                    { "evaluate": "const target = Array.from(document.querySelectorAll('button')).find(e => e.textContent.trim().toUpperCase() === 'TRADERS'); if (target) target.click();" },
                     { "wait": 4000 }
                 ])
             },
