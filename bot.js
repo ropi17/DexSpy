@@ -89,15 +89,15 @@ function sendDashboard(chatId, messageIdToEdit = null) {
                 { text: isScrapingActive ? '⏹️ STOP SCRAPER' : '▶️ START SCRAPER', callback_data: isScrapingActive ? 'cmd_stop' : 'cmd_start' }
             ],
             [
-                { text: '✏️ Edit Traders', callback_data: 'edit_traders' },
-                { text: '✏️ Edit Volume', callback_data: 'edit_volume' }
+                { text: `✏️ Traders (${currentFilter.minTraders})`, callback_data: 'edit_traders' },
+                { text: `✏️ Vol ($${currentFilter.minVolume})`, callback_data: 'edit_volume' }
             ],
             [
-                { text: '✏️ Edit Liquidity', callback_data: 'edit_liquidity' }
+                { text: `✏️ Liq ($${currentFilter.minLiquidity})`, callback_data: 'edit_liquidity' }
             ],
             [
-                { text: '✏️ Edit 5m Change', callback_data: 'edit_5m' },
-                { text: '✏️ Edit 24h Change', callback_data: 'edit_24h' }
+                { text: `✏️ 5m (${currentFilter.minPriceChange5m}%)`, callback_data: 'edit_5m' },
+                { text: `✏️ 24h (${currentFilter.minPriceChange24h}%)`, callback_data: 'edit_24h' }
             ],
             [
                 { text: '💾 SIMPAN KE DATABASE AWS', callback_data: 'save_db' }
