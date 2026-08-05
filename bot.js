@@ -232,7 +232,7 @@ async function startScrapingCycle() {
                 'wait_for': '.ds-dex-table-row',
                 'js_instructions': JSON.stringify([
                     { "wait": 2000 },
-                    { "evaluate": "const elements = Array.from(document.querySelectorAll('button, th, div')); const target = elements.find(e => e.textContent.trim() === 'TRADERS'); if (target) target.click();" },
+                    { "evaluate": "const elements = Array.from(document.querySelectorAll('button, th, div')); const target = elements.find(e => e.textContent.trim().toUpperCase() === 'TRADERS'); if (target) target.click();" },
                     { "wait": 4000 }
                 ])
             },
@@ -243,12 +243,25 @@ async function startScrapingCycle() {
         const html = response.data;
         const $ = cheerio.load(html);
         
+        // --- DYNAMIC COLUMN MAPPING ---
+        // Karena custom URL bisa menambah/mengurangi kolom (misal: kolom Txns), 
+        // kita mendeteksi indeks kolom secara dinamis dari header.
+        let col = { volume: 3, traders: 4, change5m: 5, change24h: 8, liquidity: 9 };
+        $('.ds-table-th').each((i, el) => {
+            const text = $(el).text().toUpperCase().trim();
+            if (text.includes('VOLUME')) col.volume = i;
+            if (text.includes('TRADERS') || text.includes('MAKERS')) col.traders = i;
+            if (text === '5M') col.change5m = i;
+            if (text === '24H') col.change24h = i;
+            if (text.includes('LIQUIDITY')) col.liquidity = i;
+        });
+        
         const rows = $('.ds-dex-table-row').slice(0, 10);
         if (rows.length === 0) {
             throw new Error("Tidak menemukan tabel data. Kelas mungkin berubah atau loading tertunda.");
         }
         
-        console.log(`  ↳ 1.3 Berhasil mengekstrak ${rows.length} token teratas langsung dari UI...`);
+        console.log(`  ↳ 1.3 Berhasil mengekstrak ${rows.length} token teratas... (Kolom terdeteksi: Vol=${col.volume}, Traders=${col.traders}, Liq=${col.liquidity})`);
         
         rows.each((i, el) => {
             const addressLink = $(el).attr('href');
@@ -260,12 +273,12 @@ async function startScrapingCycle() {
                 cells.push($(cellEl).text().trim());
             });
             
-            // Langsung parse metrik dari Top 10
-            const volume = parseMetric(cells[3] || "0");
-            const traders = parseMetric(cells[4] || "0");
-            const change5m = parseMetric(cells[5] || "0");
-            const change24h = parseMetric(cells[8] || "0");
-            const liquidity = parseMetric(cells[9] || "0");
+            // Parse metrik menggunakan indeks yang terdeteksi secara dinamis
+            const volume = parseMetric(cells[col.volume] || "0");
+            const traders = parseMetric(cells[col.traders] || "0");
+            const change5m = parseMetric(cells[col.change5m] || "0");
+            const change24h = parseMetric(cells[col.change24h] || "0");
+            const liquidity = parseMetric(cells[col.liquidity] || "0");
             
             scrapedData.push({ address, name, cells, volume, traders, change5m, change24h, liquidity });
         });
