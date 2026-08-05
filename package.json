@@ -4,7 +4,7 @@
   "description": "DexScreener Solana Web Scraping Bot 24/7",
   "main": "bot.js",
   "scripts": {
-    "start": "pm2 start bot.js --name dexscreener-bot",
+    "start": "pm2 start start.sh --name dexscreener-bot",
     "stop": "pm2 stop dexscreener-bot",
     "restart": "pm2 restart dexscreener-bot",
     "dev": "node bot.js"

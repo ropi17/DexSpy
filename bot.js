@@ -444,9 +444,9 @@ async function init() {
     console.log("✅ Config dimuat dari DB ke RAM:", currentFilter);
     
     // 2. Start global browser
-    console.log("Membuka browser global Playwright (Stealth Mode)...");
+    console.log("Membuka browser global Playwright (Stealth + Headful Mode via Xvfb)...");
     globalBrowser = await chromium.launch({
-        headless: true,
+        headless: false,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
