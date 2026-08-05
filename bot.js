@@ -1,31 +1,30 @@
 require('dotenv').config();
 process.env.NTBA_FIX_350 = 1; // Fix deprecation warning for sendPhoto
-const { chromium } = require('playwright-extra');
-const stealth = require('puppeteer-extra-plugin-stealth')();
-chromium.use(stealth);
 const TelegramBot = require('node-telegram-bot-api');
 const { DynamoDBClient, GetItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
 const ora = require('ora');
 const fs = require('fs');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 // Konfigurasi Environment (Gunakan .env di production)
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; // Chat ID untuk menerima notifikasi
+const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; 
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const TARGET_URL = process.env.TARGET_URL || 'https://dexscreener.com/solana';
+const ZENROWS_API_KEY = process.env.ZENROWS_API_KEY || 'YOUR_ZENROWS_API_KEY';
 
-// Inisialisasi AWS DynamoDB (Kredensial otomatis diambil dari environment / IAM Role EC2)
+// Inisialisasi AWS DynamoDB (Kredensial otomatis dari IAM Role EC2)
 const dynamodb = new DynamoDBClient({ region: AWS_REGION });
 
 // Inisialisasi Telegram Bot (Mode Polling)
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
-// === Variabel Global Manajemen Memori & State ===
-let globalBrowser = null;
+// === Variabel Global Manajemen State ===
 let isShuttingDown = false;
-let userStates = {}; // Menyimpan state percakapan user (DRAFT_MODE)
+let userStates = {}; 
 
-// RAM State (Default jika belum ada di DB)
+// RAM State 
 let currentFilter = {
     minTraders: 0,
     minVolume: 0,
@@ -51,7 +50,7 @@ async function loadConfigFromDB() {
             return true;
         }
     } catch (e) {
-        console.error("Gagal load config dari DB (Mungkin tabel belum ada/kosong):", e.message);
+        console.error("Gagal load config dari DB:", e.message);
     }
     return false;
 }
@@ -120,7 +119,6 @@ bot.on('callback_query', async (query) => {
 
 bot.on('message', (msg) => {
     const chatId = msg.chat.id;
-    // Deteksi jika user sedang dalam state DRAFT_MODE dan tidak mengetik command
     if (msg.text && !msg.text.startsWith('/') && userStates[chatId] && userStates[chatId].mode === 'DRAFT_MODE') {
         const parts = msg.text.trim().split(/\s+/);
         if (parts.length === 5) {
@@ -178,79 +176,59 @@ function parseMetric(str) {
     return isNaN(parsed) ? 0 : parsed * multiplier;
 }
 
-// === LOGIKA SCRAPING UTAMA ===
+// === LOGIKA SCRAPING UTAMA (ZENROWS API) ===
 async function startScrapingCycle() {
     if (isShuttingDown) return;
     
-    let context = null;
-    let page = null;
     let scrapeSpinner = null;
     let processSpinner = null;
     let scrapedData = [];
     
     try {
         // --- INSTANCE 1 ---
-        scrapeSpinner = ora('1. Bot melakukan web scraping... (proses)').start();
-        console.log("\n  ↳ 1.1 Membuka URL DexScreener...");
+        scrapeSpinner = ora('1. Bot melakukan Request ke ZenRows API... (proses)').start();
+        console.log("\n  ↳ 1.1 Menghubungi ZenRows untuk mem-bypass Cloudflare...");
         
-        context = await globalBrowser.newContext({
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport: { width: 1920, height: 1080 },
-            locale: 'en-US',
-            timezoneId: 'America/New_York'
+        // Memanggil API ZenRows untuk membypass Cloudflare & Render JS DexScreener
+        const response = await axios({
+            url: 'https://api.zenrows.com/v1/',
+            method: 'GET',
+            params: {
+                'url': TARGET_URL,
+                'apikey': ZENROWS_API_KEY,
+                'js_render': 'true',
+                'antibot': 'true',
+                'premium_proxy': 'true',
+                'wait_for': '.ds-dex-table-row' // Tunggu hingga tabel token termuat sepenuhnya
+            },
+            timeout: 60000 // Timeout ZenRows bisa sedikit lebih lama karena rendering JS
         });
-        page = await context.newPage();
         
-        await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        console.log("  ↳ 1.2 Mengekstrak data HTML Top 10 token dengan Cheerio...");
+        const html = response.data;
+        const $ = cheerio.load(html);
         
-        // Coba deteksi dan klik Cloudflare Checkbox jika muncul
-        try {
-            const cfIframe = await page.waitForSelector('iframe', { timeout: 5000 });
-            if (cfIframe) {
-                const frame = await cfIframe.contentFrame();
-                if (frame) {
-                    const checkbox = await frame.waitForSelector('input[type="checkbox"]', { timeout: 3000 });
-                    if (checkbox) {
-                        console.log("  ↳ Mencoba mengklik Cloudflare Checkbox...");
-                        await checkbox.click();
-                        await page.waitForTimeout(5000);
-                    }
-                }
-            }
-        } catch (e) {
-            // Abaikan jika tidak ada checkbox Cloudflare
+        const rows = $('.ds-dex-table-row').slice(0, 10);
+        
+        if (rows.length === 0) {
+            throw new Error("Tidak menemukan tabel data '.ds-dex-table-row'. Mungkin class DexScreener berubah.");
         }
         
-        console.log("  ↳ 1.2 Memvalidasi sorting data TRADER...");
-        try {
-            // Cek dan klik header TRADERS jika perlu
-            const tradersBtn = page.locator('button', { hasText: 'TRADERS' }).first();
-            if (await tradersBtn.isVisible()) {
-                await tradersBtn.click();
-                await page.waitForTimeout(2000); // Tunggu re-render
-            }
-        } catch (e) {
-            // Abaikan jika tombol TRADERS tidak ditemukan secara spesifik
-        }
-        
-        console.log("  ↳ 1.3 Mengekstrak data Top 10 token...");
-        await page.waitForSelector('.ds-dex-table-row', { timeout: 15000 });
-        const rows = await page.locator('.ds-dex-table-row').all();
-        
-        for (let i = 0; i < Math.min(10, rows.length); i++) {
-            const row = rows[i];
-            const data = await row.evaluate((el) => {
-                const addressLink = el.querySelector('a.ds-dex-table-row-link');
-                const address = addressLink ? addressLink.href.split('/').pop() : 'unknown';
-                const name = el.querySelector('.ds-dex-table-row-base-token-symbol')?.innerText || 'UNKNOWN';
-                const cells = Array.from(el.querySelectorAll('.ds-table-data-cell')).map(c => c.innerText.trim());
-                return { address, name, cells };
+        rows.each((i, el) => {
+            const addressLink = $(el).find('a.ds-dex-table-row-link').attr('href');
+            const address = addressLink ? addressLink.split('/').pop() : 'unknown';
+            const name = $(el).find('.ds-dex-table-row-base-token-symbol').text().trim() || 'UNKNOWN';
+            
+            let cells = [];
+            $(el).find('.ds-table-data-cell').each((j, cellEl) => {
+                cells.push($(cellEl).text().trim());
             });
-            scrapedData.push(data);
-        }
+            
+            scrapedData.push({ address, name, cells });
+        });
         
-        console.log("  ↳ 1.4 Data berhasil ditarik ke server.");
-        scrapeSpinner.succeed('1. Bot melakukan web scraping... (DONE)');
+        console.log("  ↳ 1.3 Data berhasil ditarik ke server.");
+        scrapeSpinner.succeed('1. Bot melakukan Request ke ZenRows API... (DONE)');
         
         // --- INSTANCE 2 ---
         processSpinner = ora('2. Mengolah data hasil scraping... (proses)').start();
@@ -262,7 +240,6 @@ async function startScrapingCycle() {
         
         for (const token of scrapedData) {
             // Asumsi mapping kolom DexScreener (Bisa disesuaikan dari debug_raw_data.json)
-            // 3: Volume, 4: Makers/Traders, 5: 5M, 8: 24H, 9: Liquidity
             const volumeStr = token.cells[3] || "0";
             const tradersStr = token.cells[4] || "0";
             const change5mStr = token.cells[5] || "0";
@@ -337,7 +314,7 @@ async function startScrapingCycle() {
                 pToken.conditionType = conditionType;
                 passedTokens.push(pToken);
                 
-                // Update ke DB agar tidak ter-alert berulang kali sebelum 5 menit / update base metrics
+                // Update ke DB 
                 try {
                     const updateCmd = new UpdateItemCommand({
                         TableName: 'DexScreenerPairs',
@@ -370,39 +347,26 @@ async function startScrapingCycle() {
                         `📈 24h Change: ${t.change24h}%\n\n` +
                         `[🔗 View on DexScreener](${TARGET_URL}/${t.address})`;
             
-            // Kirim ke admin
             bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: true }).catch(console.error);
         }
         
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
         
     } catch (e) {
-        if (page) {
-            try {
-                const screenshot = await page.screenshot();
-                // Menghapus parse_mode: 'Markdown' agar simbol aneh dari e.message tidak membuat Telegram error
-                await bot.sendPhoto(ADMIN_CHAT_ID, screenshot, { caption: `❌ Scraping Error:\n${e.message}\n\n📸 Screenshot halaman saat error terjadi` }, { filename: 'error.png', contentType: 'image/png' });
-            } catch (err) {
-                console.error("Gagal mengambil/mengirim screenshot:", err.message);
-            }
-        }
-
         if (scrapeSpinner && scrapeSpinner.isSpinning) {
-            scrapeSpinner.fail(`1. Bot melakukan web scraping... (FAILED: ${e.message})`);
+            scrapeSpinner.fail(`1. Bot melakukan web scraping API... (FAILED: ${e.message})`);
         } else if (processSpinner && processSpinner.isSpinning) {
             processSpinner.fail(`2. Mengolah data hasil scraping... (FAILED: ${e.message})`);
         } else {
             console.error("\nTerjadi error pada siklus:", e.message);
         }
-    } finally {
-        // === MEMORY LEAK PREVENTION ===
-        if (page) {
-            await page.close().catch(() => {});
-        }
-        if (context) {
-            await context.close().catch(() => {});
-        }
         
+        // Kirim error ke Telegram
+        try {
+            await bot.sendMessage(ADMIN_CHAT_ID, `❌ *API Scraping Error:*\n${e.message}`, { parse_mode: 'Markdown' });
+        } catch (err) {}
+        
+    } finally {
         console.log("\n⏳ Menunggu jeda 1 menit...\n");
         // === ANTI-OVERLAPPING LOOP ===
         if (!isShuttingDown) {
@@ -415,11 +379,6 @@ async function startScrapingCycle() {
 const shutdown = async (signal) => {
     console.log(`\nMenerima sinyal ${signal}. Menutup proses dengan aman...`);
     isShuttingDown = true;
-    
-    if (globalBrowser) {
-        await globalBrowser.close().catch(() => {});
-        console.log("✅ Browser Playwright berhasil ditutup.");
-    }
     
     try {
         await bot.stopPolling();
@@ -437,26 +396,14 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // === INISIALISASI PROGRAM ===
 async function init() {
-    console.log("🚀 Inisialisasi Bot DexScreener dimulai...");
+    console.log("🚀 Inisialisasi Bot DexScreener (ZenRows Edition)...");
     
     // 1. Load config awal dari DB
     await loadConfigFromDB();
     console.log("✅ Config dimuat dari DB ke RAM:", currentFilter);
     
-    // 2. Start global browser
-    console.log("Membuka browser global Playwright (Stealth + Headful Mode via Xvfb)...");
-    globalBrowser = await chromium.launch({
-        headless: false,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled'
-        ]
-    });
-    console.log("✅ Browser siap.");
-    
-    // 3. Mulai siklus 24/7
-    console.log("\n=== MEMULAI SIKLUS SCRAPING 24/7 ===");
+    // 2. Mulai siklus 24/7
+    console.log("\n=== MEMULAI SIKLUS SCRAPING 24/7 (LEWAT ZENROWS) ===");
     startScrapingCycle();
 }
 
