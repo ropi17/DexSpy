@@ -361,11 +361,12 @@ async function startScrapingCycle() {
                     conditionMet = true;
                     conditionType = "Baru Masuk Filter (Kondisi A)";
                 } else {
-                    // KONDISI B (Surge Traders >= 50% atau Volume >= 100%, dan jeda > 5 menit)
+                    // KONDISI B (Surge Traders >= 50% atau Volume >= 100%)
+                    // Penjaga 1 (Waktu 5 Menit) dihapus sesuai permintaan.
                     const tradersSurge = lastTraders > 0 && (pToken.traders >= lastTraders * 1.5);
                     const volumeSurge = lastVolume > 0 && (pToken.volume >= lastVolume * 2.0);
                     
-                    if ((tradersSurge || volumeSurge) && timeSinceLastAlert > fiveMinutes) {
+                    if (tradersSurge || volumeSurge) {
                         conditionMet = true;
                         conditionType = "Surge Terdeteksi (Kondisi B)";
                     }
@@ -403,7 +404,7 @@ async function startScrapingCycle() {
                         `💧 Liquidity: $${t.liquidity}\n` +
                         `📈 5m Change: ${t.change5m}%\n` +
                         `📈 24h Change: ${t.change24h}%\n\n` +
-                        `[🔗 View on DexScreener](${TARGET_URL}/${t.address})`;
+                        `[🔗 View on DexScreener](https://dexscreener.com/solana/${t.address})`;
             
             bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: false }).catch(console.error);
         }
