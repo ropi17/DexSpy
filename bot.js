@@ -26,6 +26,7 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 let isShuttingDown = false;
 let isScrapingActive = false; // Default: Berhenti saat awal boot
 let isScrapingRunning = false; // Mencegah overlapping loop fungsi asinkron
+let scraperState = "WAITING"; // "WAITING" atau "SCRAPING"
 let userStates = {}; 
 let latestDashboardChatId = null;
 let latestDashboardMsgId = null;
@@ -106,10 +107,16 @@ function startDashboardTimer(chatId, msgId) {
     dashboardTimerInterval = setInterval(() => {
         if (!isScrapingActive || latestDashboardMsgId === null) return;
         
-        const now = Date.now();
-        const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((now - lastScrapeStartTime) / 1000) : 0;
+        let timeText = "";
+        if (scraperState === "SCRAPING") {
+            timeText = "Memproses scraper...";
+        } else {
+            const now = Date.now();
+            const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((now - lastScrapeStartTime) / 1000) : 0;
+            timeText = `${elapsedSeconds}s`;
+        }
         
-        const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Siklus Scraper: Berjalan (${elapsedSeconds} detik berlalu...)\nStatus Mesin: 🟢 RUNNING\n\nPilih modul yang ingin Anda akses:`;
+        const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Time Scraper: ${timeText}\nStatus Mesin: 🟢 RUNNING\n\nPilih modul yang ingin Anda akses:`;
         
         const keyboard = {
             inline_keyboard: [
@@ -124,14 +131,18 @@ function startDashboardTimer(chatId, msgId) {
 }
 
 function sendDashboard(chatId, messageIdToEdit = null) {
-    let elapsedText = "Menunggu siklus dimulai...";
+    let timeText = "Menunggu...";
     if (isScrapingActive) {
-        const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((Date.now() - lastScrapeStartTime) / 1000) : 0;
-        elapsedText = `Berjalan (${elapsedSeconds} detik berlalu...)`;
+        if (scraperState === "SCRAPING") {
+            timeText = "Memproses scraper...";
+        } else {
+            const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((Date.now() - lastScrapeStartTime) / 1000) : 0;
+            timeText = `${elapsedSeconds}s`;
+        }
     }
     const statusText = isScrapingActive ? `🟢 RUNNING` : `🔴 STOPPED`;
 
-    const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Siklus Scraper: ${elapsedText}\nStatus Mesin: ${statusText}\n\nPilih modul yang ingin Anda akses:`;
+    const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Time Scraper: ${timeText}\nStatus Mesin: ${statusText}\n\nPilih modul yang ingin Anda akses:`;
     const keyboard = {
         inline_keyboard: [
             [{ text: '🎛️ MENU FILTER (Dashboard)', callback_data: 'menu_filter' }],
@@ -369,7 +380,7 @@ async function startScrapingCycle() {
     }
     
     isScrapingRunning = true;
-    lastScrapeStartTime = Date.now();
+    scraperState = "SCRAPING";
     let scrapeSpinner = null;
     let processSpinner = null;
     let scrapedData = [];
@@ -634,10 +645,13 @@ async function startScrapingCycle() {
     } finally {
         if (isScrapingActive && !isShuttingDown) {
             console.log("\n⏳ Menunggu jeda 1 menit...\n");
+            scraperState = "WAITING";
+            lastScrapeStartTime = Date.now();
             setTimeout(startScrapingCycle, 60000);
         } else {
             console.log("🛑 Siklus Scraper berhenti atas instruksi.");
             isScrapingRunning = false;
+            scraperState = "WAITING";
         }
     }
 }
