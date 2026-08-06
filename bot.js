@@ -221,7 +221,7 @@ async function startScrapingCycle() {
     
     try {
         scrapeSpinner = ora('1. Bot melakukan Request ke ZenRows API... (proses)').start();
-        console.log("  ↳ 1.1 Mengirim permintaan ke ZenRows AI (Menunggu Cloudflare bypass)...");
+        console.log(`\n  ↳ 1.1 Mengirim permintaan ke ZenRows AI menggunakan API Key ke-${currentApiKeyIndex + 1}...`);
         
         let html = null;
         let attempt = 0;
