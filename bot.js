@@ -314,8 +314,16 @@ async function startScrapingCycle() {
         
         // --- INSTANCE 2 ---
         processSpinner = ora('2. Mengolah data hasil scraping... (proses)').start();
-        console.log("\n  ↳ 2.1 Menyimpan Top 10 ke debug_raw_data.json...");
+        console.log("\n  ↳ 2.1 Menyimpan Top 10 ke debug_raw_data.json (Berlaku 50 detik)...");
         fs.writeFileSync('debug_raw_data.json', JSON.stringify(scrapedData, null, 2));
+        
+        // Auto-clear setelah 50 detik
+        setTimeout(() => {
+            try {
+                fs.writeFileSync('debug_raw_data.json', '[]');
+                console.log("\n  ↳ [Auto-Clear] debug_raw_data.json telah dikosongkan untuk menyambut siklus berikutnya.");
+            } catch (e) {}
+        }, 50000);
         
         console.log("  ↳ 2.2 Memfilter data menggunakan pengaturan Telegram...");
         let passedTokens = [];
