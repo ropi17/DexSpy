@@ -12,7 +12,10 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; 
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const TARGET_URL = process.env.TARGET_URL || 'https://dexscreener.com/solana';
-const ZENROWS_API_KEY = process.env.ZENROWS_API_KEY || 'YOUR_ZENROWS_API_KEY';
+
+// Mendukung multiple API keys, dipisahkan dengan koma
+const ZENROWS_API_KEYS = (process.env.ZENROWS_API_KEYS || process.env.ZENROWS_API_KEY || '').split(',').map(k => k.trim()).filter(k => k.length > 0);
+let currentApiKeyIndex = 0;
 
 // Inisialisasi AWS DynamoDB
 const dynamodb = new DynamoDBClient({ region: AWS_REGION });
@@ -218,29 +221,53 @@ async function startScrapingCycle() {
     
     try {
         scrapeSpinner = ora('1. Bot melakukan Request ke ZenRows API... (proses)').start();
-        console.log("\n  ↳ 1.1 Menghubungi ZenRows untuk mem-bypass Cloudflare...");
+        console.log("  ↳ 1.1 Mengirim permintaan ke ZenRows AI (Menunggu Cloudflare bypass)...");
         
-        const response = await axios({
-            url: 'https://api.zenrows.com/v1/',
-            method: 'GET',
-            params: {
-                'url': TARGET_URL,
-                'apikey': ZENROWS_API_KEY,
-                'js_render': 'true',
-                'antibot': 'true',
-                'premium_proxy': 'true',
-                'wait_for': '.ds-dex-table-row',
-                'js_instructions': JSON.stringify([
-                    { "wait": 2000 },
-                    { "evaluate": "const target = Array.from(document.querySelectorAll('button')).find(e => e.textContent.trim().toUpperCase() === 'TRADERS'); if (target) target.click();" },
-                    { "wait": 4000 }
-                ])
-            },
-            timeout: 90000 
-        });
+        let html = null;
+        let attempt = 0;
+        
+        while (attempt < ZENROWS_API_KEYS.length) {
+            const currentKey = ZENROWS_API_KEYS[currentApiKeyIndex];
+            try {
+                const response = await axios({
+                    url: 'https://api.zenrows.com/v1/',
+                    method: 'GET',
+                    params: {
+                        'url': TARGET_URL,
+                        'apikey': currentKey,
+                        'js_render': 'true',
+                        'antibot': 'true',
+                        'premium_proxy': 'true',
+                        'wait_for': '.ds-dex-table-row',
+                        'js_instructions': JSON.stringify([
+                            { "wait": 2000 },
+                            { "evaluate": "const target = Array.from(document.querySelectorAll('button')).find(e => e.textContent.trim().toUpperCase() === 'TRADERS'); if (target) target.click();" },
+                            { "wait": 4000 }
+                        ])
+                    },
+                    timeout: 90000 
+                });
+                html = response.data;
+                break; // Sukses, keluar dari loop
+            } catch (err) {
+                const status = err.response ? err.response.status : null;
+                console.error(`  ↳ Error dengan API Key ke-${currentApiKeyIndex + 1} (${currentKey.substring(0, 4)}...): Status ${status || err.message}`);
+                
+                // Rotasi ke API key berikutnya
+                currentApiKeyIndex = (currentApiKeyIndex + 1) % ZENROWS_API_KEYS.length;
+                attempt++;
+                
+                if (attempt < ZENROWS_API_KEYS.length) {
+                    console.log(`  ↳ Mencoba API Key cadangan ke-${currentApiKeyIndex + 1}...`);
+                }
+            }
+        }
+        
+        if (!html) {
+            throw new Error("Semua API Key ZenRows gagal atau kehabisan limit kredit!");
+        }
         
         console.log("  ↳ 1.2 Mengekstrak seluruh data HTML token dengan Cheerio...");
-        const html = response.data;
         const $ = cheerio.load(html);
         
         // --- DYNAMIC COLUMN MAPPING ---
