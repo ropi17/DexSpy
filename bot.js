@@ -6,6 +6,7 @@ const ora = require('ora');
 const fs = require('fs');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { exec } = require('child_process');
 
 // Konfigurasi Environment
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
@@ -26,6 +27,10 @@ let isShuttingDown = false;
 let isScrapingActive = false; // Default: Berhenti saat awal boot
 let isScrapingRunning = false; // Mencegah overlapping loop fungsi asinkron
 let userStates = {}; 
+let latestDashboardChatId = null;
+let latestDashboardMsgId = null;
+let lastScrapeStartTime = 0;
+let dashboardTimerInterval = null;
 
 let currentFilter = {
     minTraders: 0,
@@ -93,19 +98,56 @@ async function saveConfigToDB(filter) {
 }
 
 // === TELEGRAM INTERACTIVE DASHBOARD ===
+function startDashboardTimer(chatId, msgId) {
+    if (dashboardTimerInterval) clearInterval(dashboardTimerInterval);
+    latestDashboardChatId = chatId;
+    latestDashboardMsgId = msgId;
+    
+    dashboardTimerInterval = setInterval(() => {
+        if (!isScrapingActive || latestDashboardMsgId === null) return;
+        
+        const now = Date.now();
+        const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((now - lastScrapeStartTime) / 1000) : 0;
+        
+        const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Siklus Scraper: Berjalan (${elapsedSeconds} detik berlalu...)\nStatus Mesin: 🟢 RUNNING\n\nPilih modul yang ingin Anda akses:`;
+        
+        const keyboard = {
+            inline_keyboard: [
+                [{ text: '🎛️ MENU FILTER (Dashboard)', callback_data: 'menu_filter' }],
+                [{ text: `🎯 MENU TRACK TOKEN (${currentFilter.trackedTokens.length})`, callback_data: 'menu_track' }],
+                [{ text: '📊 LIHAT DATA MENTAH', callback_data: 'view_raw_data' }]
+            ]
+        };
+        
+        bot.editMessageText(text, { chat_id: latestDashboardChatId, message_id: latestDashboardMsgId, parse_mode: 'Markdown', reply_markup: keyboard }).catch(()=>{});
+    }, 5000);
+}
+
 function sendDashboard(chatId, messageIdToEdit = null) {
-    const text = `🤖 *Menu Utama DexScreener Bot*\n\nPilih modul yang ingin Anda akses:`;
+    let elapsedText = "Menunggu siklus dimulai...";
+    if (isScrapingActive) {
+        const elapsedSeconds = lastScrapeStartTime > 0 ? Math.floor((Date.now() - lastScrapeStartTime) / 1000) : 0;
+        elapsedText = `Berjalan (${elapsedSeconds} detik berlalu...)`;
+    }
+    const statusText = isScrapingActive ? `🟢 RUNNING` : `🔴 STOPPED`;
+
+    const text = `🤖 *Menu Utama DexScreener Bot*\n\n⏱️ Siklus Scraper: ${elapsedText}\nStatus Mesin: ${statusText}\n\nPilih modul yang ingin Anda akses:`;
     const keyboard = {
         inline_keyboard: [
             [{ text: '🎛️ MENU FILTER (Dashboard)', callback_data: 'menu_filter' }],
-            [{ text: `🎯 MENU TRACK TOKEN (${currentFilter.trackedTokens.length})`, callback_data: 'menu_track' }]
+            [{ text: `🎯 MENU TRACK TOKEN (${currentFilter.trackedTokens.length})`, callback_data: 'menu_track' }],
+            [{ text: '📊 LIHAT DATA MENTAH', callback_data: 'view_raw_data' }]
         ]
     };
 
     if (messageIdToEdit) {
-        bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', reply_markup: keyboard }).catch(()=>{});
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', reply_markup: keyboard }).then(() => {
+            if (isScrapingActive) startDashboardTimer(chatId, messageIdToEdit);
+        }).catch(()=>{});
     } else {
-        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(console.error);
+        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: keyboard }).then((sentMsg) => {
+            if (isScrapingActive) startDashboardTimer(chatId, sentMsg.message_id);
+        }).catch(console.error);
     }
 }
 
@@ -183,6 +225,15 @@ bot.on('message', async (msg) => {
         sendDashboard(chatId);
         return;
     }
+    
+    if (msg.text === '/logs') {
+        exec('pm2 logs dexscreener-bot --lines 15 --nostream', (error, stdout, stderr) => {
+            const out = stdout || stderr || "Tidak ada log tersedia.";
+            const safeOut = out.length > 3500 ? out.substring(out.length - 3500) : out;
+            bot.sendMessage(chatId, `\`\`\`\n${safeOut}\n\`\`\``, { parse_mode: 'Markdown' }).catch(console.error);
+        });
+        return;
+    }
 
     // Jika user sedang dalam mode Edit
     if (userStates[chatId] && msg.text && !msg.text.startsWith('/')) {
@@ -217,6 +268,27 @@ bot.on('callback_query', async (query) => {
         sendFilterDashboard(chatId, msgId);
     } else if (data === 'menu_track') {
         sendTrackDashboard(chatId, msgId);
+    } else if (data === 'view_raw_data') {
+        try {
+            const rawContent = fs.readFileSync('debug_raw_data.json', 'utf8');
+            const parsed = JSON.parse(rawContent);
+            if (!parsed || parsed.length === 0) throw new Error("Kosong");
+            
+            let compactText = `📊 *Data Mentah (Top ${parsed.length})*\n\n`;
+            parsed.forEach((t, idx) => {
+                compactText += `${idx+1}. **${t.name}** | P: $${t.price} | V: $${t.volume} | T: ${t.traders} | 5m: ${t.change5m}% | 24h: ${t.change24h}% | L: $${t.liquidity}\n`;
+            });
+            compactText += `\n_⏳ Pesan ini akan terhapus otomatis dalam 50 detik._`;
+            
+            bot.sendMessage(chatId, compactText, { parse_mode: 'Markdown' }).then((sentMsg) => {
+                setTimeout(() => {
+                    bot.deleteMessage(chatId, sentMsg.message_id).catch(()=>{});
+                }, 50000);
+            });
+            bot.answerCallbackQuery(query.id);
+        } catch (e) {
+            bot.answerCallbackQuery(query.id, { text: "⚠️ Data sedang kosong atau belum diekstrak (tunggu siklus berikutnya).", show_alert: true });
+        }
     } else if (data.startsWith('track_')) {
         const addr = data.split('_')[1];
         if (!currentFilter.trackedTokens.includes(addr)) {
@@ -245,6 +317,7 @@ bot.on('callback_query', async (query) => {
         }
     } else if (data === 'cmd_stop') {
         isScrapingActive = false;
+        if (dashboardTimerInterval) clearInterval(dashboardTimerInterval);
         bot.answerCallbackQuery(query.id, { text: "⏹️ Scraper Dihentikan!" });
         sendFilterDashboard(chatId, msgId);
     } else if (data.startsWith('edit_')) {
@@ -296,6 +369,7 @@ async function startScrapingCycle() {
     }
     
     isScrapingRunning = true;
+    lastScrapeStartTime = Date.now();
     let scrapeSpinner = null;
     let processSpinner = null;
     let scrapedData = [];
