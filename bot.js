@@ -32,7 +32,8 @@ let currentFilter = {
     minVolume: 0,
     minLiquidity: 0,
     minPriceChange5m: 0,
-    minPriceChange24h: 0
+    minPriceChange24h: 0,
+    trackedTokens: [] // Array of tracked addresses
 };
 
 // === FUNGSI DATABASE ===
@@ -44,11 +45,17 @@ async function loadConfigFromDB() {
         });
         const response = await dynamodb.send(command);
         if (response.Item) {
-            currentFilter.minTraders = Number(response.Item.minTraders.N);
-            currentFilter.minVolume = Number(response.Item.minVolume.N);
-            currentFilter.minLiquidity = Number(response.Item.minLiquidity.N);
-            currentFilter.minPriceChange5m = Number(response.Item.minPriceChange5m.N);
-            currentFilter.minPriceChange24h = Number(response.Item.minPriceChange24h.N);
+            currentFilter.minTraders = Number(response.Item.minTraders?.N || 0);
+            currentFilter.minVolume = Number(response.Item.minVolume?.N || 0);
+            currentFilter.minLiquidity = Number(response.Item.minLiquidity?.N || 0);
+            currentFilter.minPriceChange5m = Number(response.Item.minPriceChange5m?.N || 0);
+            currentFilter.minPriceChange24h = Number(response.Item.minPriceChange24h?.N || 0);
+            
+            if (response.Item.trackedTokens && response.Item.trackedTokens.SS) {
+                currentFilter.trackedTokens = response.Item.trackedTokens.SS;
+            } else {
+                currentFilter.trackedTokens = [];
+            }
             return true;
         }
     } catch (e) {
@@ -58,28 +65,56 @@ async function loadConfigFromDB() {
 }
 
 async function saveConfigToDB(filter) {
+    const updateExpr = 'SET minTraders = :t, minVolume = :v, minLiquidity = :l, minPriceChange5m = :p5, minPriceChange24h = :p24' + 
+                       (filter.trackedTokens.length > 0 ? ', trackedTokens = :tt' : '');
+                       
+    const attrValues = {
+        ':t': { N: filter.minTraders.toString() },
+        ':v': { N: filter.minVolume.toString() },
+        ':l': { N: filter.minLiquidity.toString() },
+        ':p5': { N: filter.minPriceChange5m.toString() },
+        ':p24': { N: filter.minPriceChange24h.toString() }
+    };
+    
+    if (filter.trackedTokens.length > 0) {
+        attrValues[':tt'] = { SS: filter.trackedTokens };
+    }
+    
     const command = new UpdateItemCommand({
         TableName: 'BotConfig',
         Key: { configId: { S: 'default' } },
-        UpdateExpression: 'SET minTraders = :t, minVolume = :v, minLiquidity = :l, minPriceChange5m = :p5, minPriceChange24h = :p24',
-        ExpressionAttributeValues: {
-            ':t': { N: filter.minTraders.toString() },
-            ':v': { N: filter.minVolume.toString() },
-            ':l': { N: filter.minLiquidity.toString() },
-            ':p5': { N: filter.minPriceChange5m.toString() },
-            ':p24': { N: filter.minPriceChange24h.toString() }
-        }
+        UpdateExpression: updateExpr,
+        ExpressionAttributeValues: attrValues
     });
+    
+    // Jika tidak ada token, kita harus handle remove atribut (tapi demi kesederhanaan, kita bisa biarkan saja atau update manual di sini)
+    // DynamoDB tidak membolehkan Set Kosong (Empty SS). Jadi jika 0, jangan update :tt
     await dynamodb.send(command);
 }
 
 // === TELEGRAM INTERACTIVE DASHBOARD ===
 function sendDashboard(chatId, messageIdToEdit = null) {
+    const text = `🤖 *Menu Utama DexScreener Bot*\n\nPilih modul yang ingin Anda akses:`;
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: '🎛️ MENU FILTER (Dashboard)', callback_data: 'menu_filter' }],
+            [{ text: `🎯 MENU TRACK TOKEN (${currentFilter.trackedTokens.length})`, callback_data: 'menu_track' }]
+        ]
+    };
+
+    if (messageIdToEdit) {
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', reply_markup: keyboard }).catch(()=>{});
+    } else {
+        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(console.error);
+    }
+}
+
+function sendFilterDashboard(chatId, messageIdToEdit = null) {
     const statusText = isScrapingActive ? "🟢 *RUNNING*" : "🔴 *STOPPED*";
     
-    const text = `🤖 *DexScreener Bot Dashboard*\n\n` +
+    const text = `🎛️ *Menu Filter (Scraper)*\n\n` +
                  `Status Mesin: ${statusText}\n\n` +
-                 `🎯 *Filter Saat Ini (RAM):*\n` +
+                 `🎯 *Filter Saat Ini:*\n` +
                  `👥 Min Traders: ${currentFilter.minTraders}\n` +
                  `📊 Min Volume: $${currentFilter.minVolume}\n` +
                  `💧 Min Liquidity: $${currentFilter.minLiquidity}\n` +
@@ -103,7 +138,8 @@ function sendDashboard(chatId, messageIdToEdit = null) {
                 { text: `✏️ 24h (${currentFilter.minPriceChange24h}%)`, callback_data: 'edit_24h' }
             ],
             [
-                { text: '💾 SIMPAN KE DATABASE AWS', callback_data: 'save_db' }
+                { text: '💾 SIMPAN FILTER', callback_data: 'save_db' },
+                { text: '⬅️ KEMBALI', callback_data: 'menu_main' }
             ]
         ]
     };
@@ -112,6 +148,30 @@ function sendDashboard(chatId, messageIdToEdit = null) {
         bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', reply_markup: keyboard }).catch(()=>{});
     } else {
         bot.sendMessage(chatId, text, { parse_mode: 'Markdown', reply_markup: keyboard }).catch(console.error);
+    }
+}
+
+function sendTrackDashboard(chatId, messageIdToEdit = null) {
+    let text = `🎯 *Menu Track Token*\n\nToken di bawah ini sedang dilacak pergerakan harganya. Jika harga anjlok lalu memantul tajam (Bounce-Back), Anda akan langsung diberi tahu.\n\n`;
+    
+    const inline_keyboard = [];
+    if (currentFilter.trackedTokens.length === 0) {
+        text += "_Belum ada token yang dilacak._";
+    } else {
+        currentFilter.trackedTokens.forEach(addr => {
+            inline_keyboard.push([
+                { text: `📈 ${addr.substring(0,6)}...${addr.substring(addr.length-4)}`, url: `https://dexscreener.com/solana/${addr}` },
+                { text: '❌ Hapus', callback_data: `untrack_${addr}` }
+            ]);
+        });
+    }
+    
+    inline_keyboard.push([{ text: '⬅️ KEMBALI', callback_data: 'menu_main' }]);
+
+    if (messageIdToEdit) {
+        bot.editMessageText(text, { chat_id: chatId, message_id: messageIdToEdit, parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: { inline_keyboard } }).catch(()=>{});
+    } else {
+        bot.sendMessage(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: { inline_keyboard } }).catch(console.error);
     }
 }
 
@@ -141,8 +201,8 @@ bot.on('message', async (msg) => {
         }
         
         userStates[chatId] = null; // clear state
-        bot.sendMessage(chatId, "✅ Nilai diupdate secara sementara (Tekan 'SIMPAN KE DATABASE' untuk memanenkannya).", { parse_mode: 'Markdown' });
-        sendDashboard(chatId);
+        bot.sendMessage(chatId, "✅ Nilai diupdate secara sementara (Tekan 'SIMPAN' untuk memanenkannya).", { parse_mode: 'Markdown' });
+        sendFilterDashboard(chatId);
     }
 });
 
@@ -151,7 +211,28 @@ bot.on('callback_query', async (query) => {
     const data = query.data;
     const msgId = query.message.message_id;
 
-    if (data === 'cmd_start') {
+    if (data === 'menu_main') {
+        sendDashboard(chatId, msgId);
+    } else if (data === 'menu_filter') {
+        sendFilterDashboard(chatId, msgId);
+    } else if (data === 'menu_track') {
+        sendTrackDashboard(chatId, msgId);
+    } else if (data.startsWith('track_')) {
+        const addr = data.split('_')[1];
+        if (!currentFilter.trackedTokens.includes(addr)) {
+            currentFilter.trackedTokens.push(addr);
+            await saveConfigToDB(currentFilter);
+            bot.answerCallbackQuery(query.id, { text: "✅ Token ditambahkan ke daftar pelacakan!", show_alert: true });
+        } else {
+            bot.answerCallbackQuery(query.id, { text: "⚠️ Token sudah dilacak!" });
+        }
+    } else if (data.startsWith('untrack_')) {
+        const addr = data.split('_')[1];
+        currentFilter.trackedTokens = currentFilter.trackedTokens.filter(t => t !== addr);
+        await saveConfigToDB(currentFilter);
+        bot.answerCallbackQuery(query.id, { text: "❌ Token dihapus dari pelacakan." });
+        sendTrackDashboard(chatId, msgId);
+    } else if (data === 'cmd_start') {
         if (!isScrapingActive) {
             isScrapingActive = true;
             bot.answerCallbackQuery(query.id, { text: "▶️ Scraper Dimulai!" });
@@ -165,7 +246,7 @@ bot.on('callback_query', async (query) => {
     } else if (data === 'cmd_stop') {
         isScrapingActive = false;
         bot.answerCallbackQuery(query.id, { text: "⏹️ Scraper Dihentikan!" });
-        sendDashboard(chatId, msgId);
+        sendFilterDashboard(chatId, msgId);
     } else if (data.startsWith('edit_')) {
         userStates[chatId] = data;
         let promptText = "";
@@ -271,11 +352,10 @@ async function startScrapingCycle() {
         const $ = cheerio.load(html);
         
         // --- DYNAMIC COLUMN MAPPING ---
-        // Karena custom URL bisa menambah/mengurangi kolom (misal: kolom Txns), 
-        // kita mendeteksi indeks kolom secara dinamis dari header.
-        let col = { volume: 3, traders: 4, change5m: 5, change24h: 8, liquidity: 9 };
+        let col = { price: 1, volume: 3, traders: 4, change5m: 5, change24h: 8, liquidity: 9 };
         $('.ds-table-th').each((i, el) => {
             const text = $(el).text().toUpperCase().trim();
+            if (text.includes('PRICE')) col.price = i;
             if (text.includes('VOLUME')) col.volume = i;
             if (text.includes('TRADERS') || text.includes('MAKERS')) col.traders = i;
             if (text === '5M') col.change5m = i;
@@ -301,13 +381,14 @@ async function startScrapingCycle() {
             });
             
             // Parse metrik menggunakan indeks yang terdeteksi secara dinamis
+            const price = parseMetric(cells[col.price] || "0");
             const volume = parseMetric(cells[col.volume] || "0");
             const traders = parseMetric(cells[col.traders] || "0");
             const change5m = parseMetric(cells[col.change5m] || "0");
             const change24h = parseMetric(cells[col.change24h] || "0");
             const liquidity = parseMetric(cells[col.liquidity] || "0");
             
-            scrapedData.push({ address, name, cells, volume, traders, change5m, change24h, liquidity });
+            scrapedData.push({ address, name, cells, price, volume, traders, change5m, change24h, liquidity });
         });
         
         scrapeSpinner.succeed('1. Ekstraksi Data via UI Click... (DONE)');
@@ -331,7 +412,7 @@ async function startScrapingCycle() {
         for (const pToken of scrapedData) {
             let lastTraders = 0;
             let lastVolume = 0;
-            let lastAlertTime = 0;
+            let lastPrice = 0;
             
             try {
                 const getCmd = new GetItemCommand({
@@ -342,79 +423,107 @@ async function startScrapingCycle() {
                 if (res.Item) {
                     lastTraders = Number(res.Item.lastTraders?.N || 0);
                     lastVolume = Number(res.Item.lastVolume?.N || 0);
-                    lastAlertTime = Number(res.Item.lastAlertTime?.N || 0);
+                    lastPrice = Number(res.Item.lastPrice?.N || 0);
                 }
             } catch (e) {
                 // Ignore DB error, anggap item baru
             }
             
-            const now = Date.now();
-            const timeSinceLastAlert = now - lastAlertTime;
-            const fiveMinutes = 5 * 60 * 1000;
-            
             let conditionMet = false;
             let conditionType = "";
+            let updateDb = false;
             
-            const meetsBasicRAM = (
-                (currentFilter.minTraders === 0 || pToken.traders >= currentFilter.minTraders) &&
-                (currentFilter.minVolume === 0 || pToken.volume >= currentFilter.minVolume) &&
-                (currentFilter.minLiquidity === 0 || pToken.liquidity >= currentFilter.minLiquidity) &&
-                (currentFilter.minPriceChange5m === 0 || pToken.change5m >= currentFilter.minPriceChange5m) &&
-                (currentFilter.minPriceChange24h === 0 || pToken.change24h >= currentFilter.minPriceChange24h)
-            );
+            const isTracked = currentFilter.trackedTokens.includes(pToken.address);
             
-            if (meetsBasicRAM) {
-                if (lastAlertTime === 0) {
-                    // KONDISI A
+            // LOGIKA TRACKED TOKEN (BOUNCE-BACK BERDASARKAN HARGA)
+            if (isTracked) {
+                if (lastPrice === 0) {
+                    // Baru pertama kali dilacak
+                    updateDb = true; 
                     conditionMet = true;
-                    conditionType = "Baru Masuk Filter (Kondisi A)";
-                } else {
-                    // KONDISI B (Surge Traders >= 50% atau Volume >= 100%)
-                    // Penjaga 1 (Waktu 5 Menit) dihapus sesuai permintaan.
-                    const tradersSurge = lastTraders > 0 && (pToken.traders >= lastTraders * 1.5);
-                    const volumeSurge = lastVolume > 0 && (pToken.volume >= lastVolume * 2.0);
-                    
-                    if (tradersSurge || volumeSurge) {
+                    conditionType = "Pelacakan Dimulai (Base Price)";
+                } else if (pToken.price < lastPrice) {
+                    // Harga ANJLOK -> Reset baseline ke harga terendah tanpa alert
+                    updateDb = true;
+                } else if (pToken.price >= lastPrice * 1.5) { // Naik 50% dari titik terendah
+                    updateDb = true;
+                    conditionMet = true;
+                    conditionType = "🎯 Bounce-Back Terdeteksi (+50% Harga)!";
+                }
+            } 
+            // LOGIKA NORMAL TOKEN (NON-TRACKED)
+            else {
+                const meetsBasicRAM = (
+                    (currentFilter.minTraders === 0 || pToken.traders >= currentFilter.minTraders) &&
+                    (currentFilter.minVolume === 0 || pToken.volume >= currentFilter.minVolume) &&
+                    (currentFilter.minLiquidity === 0 || pToken.liquidity >= currentFilter.minLiquidity) &&
+                    (currentFilter.minPriceChange5m === 0 || pToken.change5m >= currentFilter.minPriceChange5m) &&
+                    (currentFilter.minPriceChange24h === 0 || pToken.change24h >= currentFilter.minPriceChange24h)
+                );
+                
+                if (meetsBasicRAM) {
+                    if (lastVolume === 0) {
                         conditionMet = true;
-                        conditionType = "Surge Terdeteksi (Kondisi B)";
+                        updateDb = true;
+                        conditionType = "Baru Masuk Filter (Kondisi A)";
+                    } else {
+                        const tradersSurge = lastTraders > 0 && (pToken.traders >= lastTraders * 1.5);
+                        const volumeSurge = lastVolume > 0 && (pToken.volume >= lastVolume * 2.0);
+                        
+                        if (tradersSurge || volumeSurge) {
+                            conditionMet = true;
+                            updateDb = true;
+                            conditionType = "Surge Terdeteksi (Kondisi B)";
+                        }
                     }
                 }
+            }
+            
+            if (updateDb) {
+                try {
+                    const updateCmd = new UpdateItemCommand({
+                        TableName: 'DexScreenerPairs',
+                        Key: { pairAddress: { S: pToken.address } },
+                        UpdateExpression: 'SET lastTraders = :t, lastVolume = :v, lastPrice = :p',
+                        ExpressionAttributeValues: {
+                            ':t': { N: pToken.traders.toString() },
+                            ':v': { N: pToken.volume.toString() },
+                            ':p': { N: pToken.price.toString() }
+                        }
+                    });
+                    await dynamodb.send(updateCmd);
+                } catch (e) {}
             }
             
             if (conditionMet) {
                 pToken.conditionType = conditionType;
                 passedTokens.push(pToken);
-                
-                try {
-                    const updateCmd = new UpdateItemCommand({
-                        TableName: 'DexScreenerPairs',
-                        Key: { pairAddress: { S: pToken.address } },
-                        UpdateExpression: 'SET lastTraders = :t, lastVolume = :v, lastAlertTime = :a',
-                        ExpressionAttributeValues: {
-                            ':t': { N: pToken.traders.toString() },
-                            ':v': { N: pToken.volume.toString() },
-                            ':a': { N: now.toString() }
-                        }
-                    });
-                    await dynamodb.send(updateCmd);
-                } catch (e) {}
             }
         }
         
         console.log(`  ↳ 2.3 Ditemukan ${passedTokens.length} token lolos filter.`);
         
         for (const t of passedTokens) {
+            const isTracked = currentFilter.trackedTokens.includes(t.address);
+            
             const msg = `🚀 *DexScreener Alert - ${t.conditionType}*\n\n` +
                         `*Token:* ${t.name}\n` +
                         `*Address:* \`${t.address}\`\n\n` +
+                        `💵 Price: $${t.price}\n` +
                         `👥 Traders: ${t.traders}\n` +
                         `📊 Volume: $${t.volume}\n` +
                         `💧 Liquidity: $${t.liquidity}\n` +
                         `📈 5m Change: ${t.change5m}%\n` +
-                        `📈 24h Change: ${t.change24h}%\n\n` +
-                        `[🔗 View on DexScreener](https://dexscreener.com/solana/${t.address})`;
+                        `📈 24h Change: ${t.change24h}%\n\n`;
             
-            bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: false }).catch(console.error);
+            const keyboard = {
+                inline_keyboard: [
+                    [{ text: '🔗 View on DexScreener', url: `https://dexscreener.com/solana/${t.address}` }],
+                    !isTracked ? [{ text: '🎯 Lacak Token Ini', callback_data: `track_${t.address}` }] : []
+                ].filter(row => row.length > 0)
+            };
+            
+            bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: false, reply_markup: keyboard }).catch(console.error);
         }
         
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
