@@ -348,11 +348,11 @@ async function startScrapingCycle() {
             let conditionType = "";
             
             const meetsBasicRAM = (
-                pToken.traders >= currentFilter.minTraders &&
-                pToken.volume >= currentFilter.minVolume &&
-                pToken.liquidity >= currentFilter.minLiquidity &&
-                pToken.change5m >= currentFilter.minPriceChange5m &&
-                pToken.change24h >= currentFilter.minPriceChange24h
+                (currentFilter.minTraders === 0 || pToken.traders >= currentFilter.minTraders) &&
+                (currentFilter.minVolume === 0 || pToken.volume >= currentFilter.minVolume) &&
+                (currentFilter.minLiquidity === 0 || pToken.liquidity >= currentFilter.minLiquidity) &&
+                (currentFilter.minPriceChange5m === 0 || pToken.change5m >= currentFilter.minPriceChange5m) &&
+                (currentFilter.minPriceChange24h === 0 || pToken.change24h >= currentFilter.minPriceChange24h)
             );
             
             if (meetsBasicRAM) {
