@@ -413,6 +413,7 @@ async function startScrapingCycle() {
             let lastTraders = 0;
             let lastVolume = 0;
             let lastPrice = 0;
+            let lastAlertTime = 0;
             
             try {
                 const getCmd = new GetItemCommand({
@@ -424,9 +425,30 @@ async function startScrapingCycle() {
                     lastTraders = Number(res.Item.lastTraders?.N || 0);
                     lastVolume = Number(res.Item.lastVolume?.N || 0);
                     lastPrice = Number(res.Item.lastPrice?.N || 0);
+                    lastAlertTime = Number(res.Item.lastAlertTime?.N || 0);
                 }
             } catch (e) {
                 // Ignore DB error, anggap item baru
+            }
+            
+            const now = Date.now();
+            
+            // JIKA WAKTU SUDAH LEBIH DARI 30 MENIT -> RESET MENJADI TOKEN BARU
+            if (lastAlertTime > 0 && (now - lastAlertTime) > (30 * 60 * 1000)) {
+                lastTraders = 0;
+                lastVolume = 0;
+                lastPrice = 0;
+                lastAlertTime = 0;
+                
+                try {
+                    // Opsional: Langsung hapus dari database agar bersih
+                    const { DeleteItemCommand } = require('@aws-sdk/client-dynamodb');
+                    const delCmd = new DeleteItemCommand({
+                        TableName: 'DexScreenerPairs',
+                        Key: { pairAddress: { S: pToken.address } }
+                    });
+                    dynamodb.send(delCmd).catch(()=>{});
+                } catch(e) {}
             }
             
             let conditionMet = false;
@@ -484,11 +506,12 @@ async function startScrapingCycle() {
                     const updateCmd = new UpdateItemCommand({
                         TableName: 'DexScreenerPairs',
                         Key: { pairAddress: { S: pToken.address } },
-                        UpdateExpression: 'SET lastTraders = :t, lastVolume = :v, lastPrice = :p',
+                        UpdateExpression: 'SET lastTraders = :t, lastVolume = :v, lastPrice = :p, lastAlertTime = :a',
                         ExpressionAttributeValues: {
                             ':t': { N: pToken.traders.toString() },
                             ':v': { N: pToken.volume.toString() },
-                            ':p': { N: pToken.price.toString() }
+                            ':p': { N: pToken.price.toString() },
+                            ':a': { N: now.toString() }
                         }
                     });
                     await dynamodb.send(updateCmd);
