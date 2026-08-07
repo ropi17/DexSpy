@@ -10,7 +10,7 @@ const { exec } = require('child_process');
 
 // Konfigurasi Environment
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_TELEGRAM_BOT_TOKEN';
-const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID || 'YOUR_ADMIN_CHAT_ID'; 
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || '').split(',').map(id => id.trim()).filter(id => id.length > 0);
 const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
 const TARGET_URL = process.env.TARGET_URL || 'https://dexscreener.com/solana';
 
@@ -231,6 +231,9 @@ function sendTrackDashboard(chatId, messageIdToEdit = null) {
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     
+    // Keamanan: Tolak jika pengguna tidak ada di daftar ADMIN_CHAT_IDS
+    if (!ADMIN_CHAT_IDS.includes(chatId.toString())) return;
+    
     if (msg.text === '/start' || msg.text === '/menu') {
         userStates[chatId] = null; // reset state
         sendDashboard(chatId);
@@ -272,6 +275,12 @@ bot.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const data = query.data;
     const msgId = query.message.message_id;
+
+    // Keamanan: Tolak jika pengguna tidak ada di daftar ADMIN_CHAT_IDS
+    if (!ADMIN_CHAT_IDS.includes(chatId.toString())) {
+        bot.answerCallbackQuery(query.id, { text: "Anda tidak berhak menggunakan bot ini." });
+        return;
+    }
 
     if (data === 'menu_main') {
         sendDashboard(chatId, msgId);
@@ -631,7 +640,9 @@ async function startScrapingCycle() {
                 ].filter(row => row.length > 0)
             };
             
-            bot.sendMessage(ADMIN_CHAT_ID, msg, { parse_mode: 'Markdown', disable_web_page_preview: false, reply_markup: keyboard }).catch(console.error);
+            for (const adminId of ADMIN_CHAT_IDS) {
+                bot.sendMessage(adminId, msg, { parse_mode: 'Markdown', disable_web_page_preview: false, reply_markup: keyboard }).catch(console.error);
+            }
         }
         
         processSpinner.succeed('2. Mengolah data hasil scraping... (DONE)');
@@ -641,7 +652,9 @@ async function startScrapingCycle() {
         else if (processSpinner && processSpinner.isSpinning) processSpinner.fail(`2. Data Error... (FAILED: ${e.message})`);
         else console.error("\nTerjadi error pada siklus:", e.message);
         
-        try { bot.sendMessage(ADMIN_CHAT_ID, `❌ *API Scraping Error:*\n${e.message}`, { parse_mode: 'Markdown' }); } catch (err) {}
+        for (const adminId of ADMIN_CHAT_IDS) {
+            try { bot.sendMessage(adminId, `❌ *API Scraping Error:*\n${e.message}`, { parse_mode: 'Markdown' }); } catch (err) {}
+        }
     } finally {
         if (isScrapingActive && !isShuttingDown) {
             console.log("\n⏳ Menunggu jeda 1 menit...\n");
