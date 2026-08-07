@@ -296,7 +296,7 @@ bot.on('callback_query', async (query) => {
             
             let compactText = `📊 *Data Mentah (Top ${parsed.length})*\n\n`;
             parsed.forEach((t, idx) => {
-                compactText += `${idx+1}. **${t.name}** | P: $${t.price} | V: $${t.volume} | T: ${t.traders} | 5m: ${t.change5m}% | 24h: ${t.change24h}% | L: $${t.liquidity}\n`;
+                compactText += `${idx+1}. **${t.name}** (${t.dex || 'Unknown'}) | P: $${t.price} | V: $${t.volume} | T: ${t.traders} | 5m: ${t.change5m}% | 24h: ${t.change24h}% | L: $${t.liquidity}\n`;
             });
             compactText += `\n_⏳ Pesan ini akan terhapus otomatis dalam 50 detik._`;
             
@@ -469,6 +469,21 @@ async function startScrapingCycle() {
             const address = addressLink ? addressLink.split('/').pop() : 'unknown';
             const name = $(el).find('.ds-dex-table-row-base-token-symbol').text().trim() || 'UNKNOWN';
             
+            // Coba deteksi DEX dari gambar (ikon) di baris tersebut
+            let dex = "Unknown";
+            $(el).find('img').each((idx, imgEl) => {
+                const title = $(imgEl).attr('title');
+                const alt = $(imgEl).attr('alt');
+                const src = $(imgEl).attr('src') || "";
+                
+                if (title && title.toLowerCase().includes('pump')) dex = "Pumpswap";
+                else if (title && title.toLowerCase().includes('raydium')) dex = "Raydium";
+                else if (alt && alt.toLowerCase().includes('pump')) dex = "Pumpswap";
+                else if (alt && alt.toLowerCase().includes('raydium')) dex = "Raydium";
+                else if (src.toLowerCase().includes('pump')) dex = "Pumpswap";
+                else if (src.toLowerCase().includes('raydium')) dex = "Raydium";
+            });
+            
             let cells = [];
             $(el).find('.ds-table-data-cell').each((j, cellEl) => {
                 cells.push($(cellEl).text().trim());
@@ -482,7 +497,7 @@ async function startScrapingCycle() {
             const change24h = parseMetric(cells[col.change24h] || "0");
             const liquidity = parseMetric(cells[col.liquidity] || "0");
             
-            scrapedData.push({ address, name, cells, price, volume, traders, change5m, change24h, liquidity });
+            scrapedData.push({ address, name, dex, cells, price, volume, traders, change5m, change24h, liquidity });
         });
         
         scrapeSpinner.succeed('1. Ekstraksi Data via UI Click... (DONE)');
@@ -625,7 +640,8 @@ async function startScrapingCycle() {
             
             const msg = `🚀 *DexScreener Alert - ${t.conditionType}*\n\n` +
                         `*Token:* ${t.name}\n` +
-                        `*Address:* \`${t.address}\`\n\n` +
+                        `*Address:* \`${t.address}\`\n` +
+                        `🏛️ *DEX:* ${t.dex || 'Unknown'}\n\n` +
                         `💵 Price: $${t.price}\n` +
                         `👥 Traders: ${t.traders}\n` +
                         `📊 Volume: $${t.volume}\n` +
